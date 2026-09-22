@@ -81,9 +81,24 @@ cmd_setup() {
 
     if [[ ! -x "$PY" ]]; then
         _step "Creating the Python environment"; _pct 2
-        command -v python3 >/dev/null || { echo "ERR|python3 not found"; return 1; }
-        python3 -m venv "$DATA_DIR/venv" >/dev/null 2>&1 \
-            || { echo "ERR|could not create the Python environment (install python3-venv)"; return 1; }
+        # faster-whisper pulls in tokenizers, which has no working wheel for
+        # Python 3.8 — and 3.8 is what `python3` still is on Ubuntu 20.04, so
+        # picking the plain interpreter silently builds a broken environment.
+        local _py=""
+        for _c in python3.13 python3.12 python3.11 python3.10 python3.9; do
+            command -v "$_c" >/dev/null 2>&1 && { _py="$_c"; break; }
+        done
+        if [[ -z "$_py" ]] && command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null \
+                && _py=python3
+        fi
+        if [[ -z "$_py" ]]; then
+            echo "ERR|needs Python 3.9 or newer; found $(python3 -V 2>&1). On Ubuntu 20.04: sudo apt install python3.11 python3.11-venv"
+            return 1
+        fi
+        _step "Creating the Python environment ($_py)"
+        "$_py" -m venv "$DATA_DIR/venv" >/dev/null 2>&1 \
+            || { echo "ERR|could not create the environment (try: sudo apt install ${_py}-venv)"; return 1; }
         _pct 8
         _step "Installing speech recognition (a few minutes)"
         "$DATA_DIR/venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1
@@ -153,6 +168,10 @@ import sys
 from faster_whisper import WhisperModel
 WhisperModel(sys.argv[1], device="cpu", compute_type="int8")
 PYEOF
+    if ! "$PY" -c "import faster_whisper" >/dev/null 2>&1; then
+        echo "ERR|the Python environment is not usable (faster-whisper failed to import)"
+        return 1
+    fi
     _pct 100
     _step "Setup complete"
     (( porcelain )) && echo "DONE|"
@@ -181,6 +200,15 @@ cmd_start() {
     sleep 1
     kill -0 "$(cat "$DATA_DIR/.mic.pid")" 2>/dev/null || die "microphone capture failed to start"
     kill -0 "$(cat "$DATA_DIR/.sys.pid")" 2>/dev/null || die "system audio capture failed to start"
+
+    # transcribe while the meeting runs, so stopping is nearly instant
+    if [[ "${MEETINGINSIGHTS_LIVE:-1}" == "1" && -f "$PREFIX/lib/live_transcribe.py" ]]; then
+        rm -f "$base.stop" "$base.live.done"
+        setsid "$PY" "$PREFIX/lib/live_transcribe.py" "$base" \
+            "$WHISPER_MODEL" "$YOU_LABEL" "$THEM_LABEL" \
+            >"$DATA_DIR/.live.log" 2>&1 < /dev/null &
+        echo $! > "$DATA_DIR/.live.pid"
+    fi
 
     printf '%s\n%s\n%s\n' "$base" "$title" "$(date +%s)" > "$STATE"
     echo "Recording: $title"
@@ -228,10 +256,29 @@ cmd_stop() {
     [[ -s "$base.wav" ]] || die "could not merge the two audio channels"
     rm -f "$base.mic.wav" "$base.sys.wav"
 
-    echo "Transcribing on this machine (model: $WHISPER_MODEL)..."
-    "$PY" "$PREFIX/lib/transcribe.py" "$base.wav" "$base.txt" \
-        "$WHISPER_MODEL" "$YOU_LABEL" "$THEM_LABEL" \
-        || die "nothing was transcribed — was the recording silent?"
+    local live_pid="" used_live=0
+    [[ -f "$DATA_DIR/.live.pid" ]] && { live_pid=$(cat "$DATA_DIR/.live.pid"); rm -f "$DATA_DIR/.live.pid"; }
+    if [[ -n "$live_pid" ]] && kill -0 "$live_pid" 2>/dev/null; then
+        echo "Finishing transcription (most of it was done during the meeting)..."
+        touch "$base.stop"
+        local waited=0
+        while kill -0 "$live_pid" 2>/dev/null && (( waited < 600 )); do
+            sleep 2; waited=$((waited + 2))
+        done
+        kill "$live_pid" 2>/dev/null
+        if [[ -s "$base.partial.txt" ]]; then
+            mv "$base.partial.txt" "$base.txt"; used_live=1
+        fi
+    fi
+    rm -f "$base.stop" "$base.live.done" "$base.partial.txt"
+
+    if (( ! used_live )); then
+        echo "Transcribing on this machine (model: $WHISPER_MODEL)..."
+        "$PY" "$PREFIX/lib/transcribe.py" "$base.wav" "$base.txt" \
+            "$WHISPER_MODEL" "$YOU_LABEL" "$THEM_LABEL" \
+            || die "nothing was transcribed — was the recording silent?"
+    fi
+    [[ -s "$base.txt" ]] || die "nothing was transcribed — was the recording silent?"
 
     cmd_notes "$base.txt" "$title" "$mins"
 }
