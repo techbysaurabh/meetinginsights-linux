@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MeetingInsights
+GenericName=AI Note Taker
+Comment=Record meetings and write notes with on-device AI
+Exec=meetinginsights-gui
+Icon=meetinginsights
+Terminal=false
+Categories=Office;AudioVideo;Recorder;
+Keywords=meeting;notes;minutes;transcribe;record;offline;ai;
+StartupNotify=true

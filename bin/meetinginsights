@@ -1,0 +1,177 @@
+#!/bin/bash
+# meetinginsights — MeetingInsights: AI Note Taker.
+#
+#   meetinginsights start "Sprint planning"   begin recording (microphone + system audio)
+#   meetinginsights stop                      stop, transcribe, write notes
+#   meetinginsights status                    show whether a recording is running
+#   meetinginsights notes <transcript.txt>    (re)generate notes from a transcript
+#   meetinginsights setup                     fetch the speech and language models
+#
+# Nothing leaves the machine: audio is captured with PulseAudio, transcribed by
+# faster-whisper and summarised by a small local GGUF model via llama.cpp. There
+# is no network call at run time and no API key anywhere.
+#
+# Your microphone is recorded to the LEFT channel and everything you hear to the
+# RIGHT, so who-said-what comes from audio routing rather than a guess.
+
+set -uo pipefail
+
+# Find the library directory, whichever layout we are running from:
+# an explicit prefix, a system install, a ~/.local install, or the source tree.
+_bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREFIX=""
+for _c in "${MEETINGINSIGHTS_PREFIX:-}" \
+          "$_bin_dir/../share/meetinginsights" \
+          "/usr/share/meetinginsights" \
+          "/usr/local/share/meetinginsights" \
+          "$_bin_dir/.."; do
+    [[ -n "$_c" && -f "$_c/lib/notes_local.py" ]] && { PREFIX="$(cd "$_c" && pwd)"; break; }
+done
+[[ -n "$PREFIX" ]] || { echo "meetinginsights: cannot locate its lib/ directory" >&2; exit 1; }
+
+DATA_DIR="${MEETINGINSIGHTS_HOME:-$HOME/.local/share/meetinginsights}"
+OUT_DIR="${MEETINGINSIGHTS_OUT:-$HOME/MeetingNotes}"
+WHISPER_MODEL="${MEETINGINSIGHTS_WHISPER_MODEL:-small.en}"
+LLM_MODEL="${MEETINGINSIGHTS_LLM_MODEL:-$DATA_DIR/models/qwen2.5-0.5b-instruct-q4_k_m.gguf}"
+LLM_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+YOU_LABEL="${MEETINGINSIGHTS_YOU:-You}"
+THEM_LABEL="${MEETINGINSIGHTS_THEM:-Participants}"
+PY="${MEETINGINSIGHTS_PYTHON:-$DATA_DIR/venv/bin/python}"
+LLAMA="${MEETINGINSIGHTS_LLAMA:-$DATA_DIR/llama/llama}"
+STATE="$DATA_DIR/current"
+
+die()  { echo "meetinginsights: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+default_monitor() {
+    local sink; sink=$(pactl info 2>/dev/null | awk -F': ' '/Default Sink/{print $2}')
+    [[ -n "$sink" ]] && echo "${sink}.monitor"
+}
+
+check_ready() {
+    [[ -x "$PY" ]]        || die "python environment missing — run: meetinginsights setup"
+    [[ -x "$LLAMA" ]]     || die "llama.cpp runtime missing — run: meetinginsights setup"
+    [[ -s "$LLM_MODEL" ]] || die "language model missing — run: meetinginsights setup"
+}
+
+cmd_setup() {
+    mkdir -p "$DATA_DIR/models" "$OUT_DIR"
+    if [[ ! -s "$LLM_MODEL" ]]; then
+        echo "Downloading the language model (~470 MB, one time)..."
+        need curl
+        curl -fL --retry 3 --progress-bar "$LLM_URL" -o "$LLM_MODEL.part" \
+            && mv "$LLM_MODEL.part" "$LLM_MODEL" \
+            || { rm -f "$LLM_MODEL.part"; die "model download failed"; }
+    else
+        echo "Language model present."
+    fi
+    if [[ -x "$PY" ]]; then
+        echo "Fetching the speech model (one time)..."
+        "$PY" - "$WHISPER_MODEL" <<'EOF' || echo "  (will download on first use instead)"
+import sys
+from faster_whisper import WhisperModel
+WhisperModel(sys.argv[1], device="cpu", compute_type="int8")
+print("  speech model ready")
+EOF
+    fi
+    echo "Setup complete."
+}
+
+cmd_start() {
+    [[ -f "$STATE" ]] && die "already recording (see: meetinginsights status)"
+    need parec; need ffmpeg; check_ready
+    local title="${1:-meeting}" slug ts base
+    slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')
+    ts=$(date +%Y-%m-%d_%H-%M)
+    base="$DATA_DIR/rec/${ts}_${slug}"
+    mkdir -p "$DATA_DIR/rec" "$OUT_DIR"
+
+    local mon; mon=$(default_monitor)
+    [[ -n "$mon" ]] || die "could not find the default audio sink (is PulseAudio or PipeWire running?)"
+
+    parec --device=@DEFAULT_SOURCE@ --format=s16le --rate=16000 --channels=1 \
+        --file-format=wav "$base.mic.wav" >/dev/null 2>&1 &
+    echo $! > "$DATA_DIR/.mic.pid"
+    parec --device="$mon" --format=s16le --rate=16000 --channels=1 \
+        --file-format=wav "$base.sys.wav" >/dev/null 2>&1 &
+    echo $! > "$DATA_DIR/.sys.pid"
+
+    sleep 1
+    kill -0 "$(cat "$DATA_DIR/.mic.pid")" 2>/dev/null || die "microphone capture failed to start"
+    kill -0 "$(cat "$DATA_DIR/.sys.pid")" 2>/dev/null || die "system audio capture failed to start"
+
+    printf '%s\n%s\n%s\n' "$base" "$title" "$(date +%s)" > "$STATE"
+    echo "Recording: $title"
+    echo "Stop with: meetinginsights stop"
+    echo
+    echo "Please make sure everyone on the call knows they are being recorded."
+}
+
+cmd_status() {
+    [[ -f "$STATE" ]] || { echo "Not recording."; return 0; }
+    local base title started
+    { read -r base; read -r title; read -r started; } < "$STATE"
+    echo "Recording \"$title\" for $(( ($(date +%s) - started) / 60 ))m ($(basename "$base"))"
+}
+
+cmd_stop() {
+    [[ -f "$STATE" ]] || die "not recording"
+    local base title started
+    { read -r base; read -r title; read -r started; } < "$STATE"
+
+    local p f
+    for p in mic sys; do
+        f="$DATA_DIR/.$p.pid"
+        [[ -f "$f" ]] && { kill "$(cat "$f")" 2>/dev/null; rm -f "$f"; }
+    done
+    sleep 1; rm -f "$STATE"
+
+    local mins=$(( ($(date +%s) - started) / 60 ))
+    echo "Stopped after ${mins}m. Merging channels..."
+    local d1 d2 dmax
+    d1=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$base.mic.wav" 2>/dev/null)
+    d2=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$base.sys.wav" 2>/dev/null)
+    dmax=$(awk -v a="${d1:-0}" -v b="${d2:-0}" 'BEGIN{print (a>b)?a:b}')
+    ffmpeg -loglevel error -y -i "$base.mic.wav" -i "$base.sys.wav" \
+        -filter_complex "[0:a]apad=whole_dur=$dmax[l];[1:a]apad=whole_dur=$dmax[r];[l][r]join=inputs=2:channel_layout=stereo[a]" \
+        -map "[a]" -ar 16000 "$base.wav" 2>&1 | tail -2
+    [[ -s "$base.wav" ]] || die "could not merge the two audio channels"
+    rm -f "$base.mic.wav" "$base.sys.wav"
+
+    echo "Transcribing on this machine (model: $WHISPER_MODEL)..."
+    "$PY" "$PREFIX/lib/transcribe.py" "$base.wav" "$base.txt" \
+        "$WHISPER_MODEL" "$YOU_LABEL" "$THEM_LABEL" \
+        || die "nothing was transcribed — was the recording silent?"
+
+    cmd_notes "$base.txt" "$title" "$mins"
+}
+
+cmd_notes() {
+    local transcript="$1" title="${2:-meeting}" mins="${3:-?}"
+    [[ -s "$transcript" ]] || die "empty transcript: $transcript"
+    check_ready
+    mkdir -p "$OUT_DIR"
+    local out="$OUT_DIR/$(basename "${transcript%.txt}").md"
+
+    echo "Writing notes on this machine ($(basename "$LLM_MODEL"))..."
+    if MEETINGINSIGHTS_LLAMA_DIR="$(dirname "$LLAMA")" \
+       "$PY" "$PREFIX/lib/notes_local.py" "$transcript" "$out" "$LLM_MODEL" "$title" "$mins" \
+         >"$DATA_DIR/.last_notes.log" 2>&1 && [[ -s "$out" ]]; then
+        echo "Notes: $out"
+        echo "Transcript: $transcript"
+        return 0
+    fi
+    echo "Note generation failed; see $DATA_DIR/.last_notes.log" >&2
+    echo "The transcript is still available: $transcript" >&2
+    return 1
+}
+
+case "${1:-}" in
+    start)  shift; cmd_start "$@" ;;
+    stop)   cmd_stop ;;
+    status) cmd_status ;;
+    setup)  cmd_setup ;;
+    notes)  shift; [[ $# -ge 1 ]] || die "usage: meetinginsights notes <transcript.txt>"; cmd_notes "$@" ;;
+    -h|--help|help|"") sed -n '3,17p' "$0" | sed 's/^# \?//' ;;
+    *) die "unknown command: $1 (try: meetinginsights help)" ;;
+esac
