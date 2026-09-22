@@ -41,7 +41,7 @@ model and into rules fixed every misclassification and cut runtime by ~75%.
 to be compiled:
 
 ```sh
-sudo apt install ./meetinginsights_0.1.0_amd64.deb
+sudo apt install ./meetinginsights_0.1.1_amd64.deb
 meetinginsights setup      # prepares Python and downloads the models (~1.5 GB, once)
 ```
 

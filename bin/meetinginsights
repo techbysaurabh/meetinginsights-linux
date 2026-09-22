@@ -61,34 +61,102 @@ check_ready() {
     [[ -s "$LLM_MODEL" ]] || die "language model missing — run: meetinginsights setup"
 }
 
+# Emits "PCT|<0-100>" and "STEP|<text>" lines when --porcelain is passed, so the
+# desktop app can render a progress bar instead of sending people to a terminal.
 cmd_setup() {
+    local porcelain=0
+    [[ "${1:-}" == "--porcelain" ]] && porcelain=1
+    _step() { if (( porcelain )); then echo "STEP|$1"; else echo "$1"; fi; }
+    _pct()  { (( porcelain )) && echo "PCT|$1"; }
+
     mkdir -p "$DATA_DIR/models" "$OUT_DIR"
-    if [[ ! -s "$LLM_MODEL" ]]; then
-        echo "Downloading the language model (~470 MB, one time)..."
-        need curl
-        curl -fL --retry 3 --progress-bar "$LLM_URL" -o "$LLM_MODEL.part" \
-            && mv "$LLM_MODEL.part" "$LLM_MODEL" \
-            || { rm -f "$LLM_MODEL.part"; die "model download failed"; }
-    else
-        echo "Language model present."
+
+    # Only one setup at a time: a second run (GUI button pressed twice, or CLI
+    # alongside the app) would fight over the same partial download.
+    exec 9>"$DATA_DIR/.setup.lock"
+    if ! flock -n 9; then
+        echo "ERR|setup is already running in another window"
+        return 1
     fi
+
     if [[ ! -x "$PY" ]]; then
-        echo "Creating the Python environment (a few minutes, one time)..."
-        need python3
-        python3 -m venv "$DATA_DIR/venv" || die "could not create the Python environment (is python3-venv installed?)"
-        "$DATA_DIR/venv/bin/pip" install -q --upgrade pip
-        "$DATA_DIR/venv/bin/pip" install -q faster-whisper || die "could not install faster-whisper"
+        _step "Creating the Python environment"; _pct 2
+        command -v python3 >/dev/null || { echo "ERR|python3 not found"; return 1; }
+        python3 -m venv "$DATA_DIR/venv" >/dev/null 2>&1 \
+            || { echo "ERR|could not create the Python environment (install python3-venv)"; return 1; }
+        _pct 8
+        _step "Installing speech recognition (a few minutes)"
+        "$DATA_DIR/venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1
+        "$DATA_DIR/venv/bin/pip" install -q faster-whisper >/dev/null 2>&1 \
+            || { echo "ERR|could not install faster-whisper"; return 1; }
+        _pct 35
+    else
+        _step "Python environment ready"; _pct 35
     fi
-    if [[ -x "$PY" ]]; then
-        echo "Fetching the speech model (one time)..."
-        "$PY" - "$WHISPER_MODEL" <<'EOF' || echo "  (will download on first use instead)"
+
+    if [[ ! -s "$LLM_MODEL" ]]; then
+        _step "Downloading the language model (about 470 MB)"
+        rm -f "$LLM_MODEL.part"
+        "$PY" - "$LLM_URL" "$LLM_MODEL.part" "$porcelain" <<'PYEOF' || { echo "ERR|model download failed"; rm -f "$LLM_MODEL.part"; return 1; }
+import os, sys, time, urllib.request
+
+url, dest, porcelain = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+
+
+def emit(pct, last):
+    if porcelain and pct != last:
+        print(f"PCT|{pct}", flush=True)
+    return pct
+
+
+for attempt in range(3):
+    have = os.path.getsize(dest) if os.path.exists(dest) else 0
+    req = urllib.request.Request(url)
+    if have:                                   # resume rather than restart
+        req.add_header("Range", f"bytes={have}-")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            total = int(r.headers.get("Content-Length") or 0)
+            if r.status == 206:
+                total += have                  # partial response counts only the remainder
+            elif have:
+                have = 0                       # server ignored Range; start over
+            mode = "ab" if have else "wb"
+            last = -1
+            with open(dest, mode) as f:
+                while chunk := r.read(1 << 20):
+                    f.write(chunk); have += len(chunk)
+                    if total:
+                        # this download spans 35..85% of the overall bar
+                        last = emit(35 + int(have * 50 / total), last)
+        # A short read raises no error, so the size is the only thing that proves
+        # the file is whole. Without this check a dropped connection installs a
+        # truncated model that still starts with the GGUF magic bytes.
+        if total and os.path.getsize(dest) != total:
+            raise IOError(f"incomplete: {os.path.getsize(dest)} of {total} bytes")
+        sys.exit(0)
+    except Exception as e:                      # noqa: BLE001 - retried below
+        print(f"STEP|Download interrupted ({e}); retrying", flush=True)
+        time.sleep(2 * (attempt + 1))
+
+sys.exit(1)
+PYEOF
+        mv "$LLM_MODEL.part" "$LLM_MODEL"
+    else
+        _step "Language model present"
+    fi
+    _pct 85
+
+    _step "Fetching the speech model"
+    "$PY" - "$WHISPER_MODEL" >/dev/null 2>&1 <<'PYEOF' || true
 import sys
 from faster_whisper import WhisperModel
 WhisperModel(sys.argv[1], device="cpu", compute_type="int8")
-print("  speech model ready")
-EOF
-    fi
-    echo "Setup complete."
+PYEOF
+    _pct 100
+    _step "Setup complete"
+    (( porcelain )) && echo "DONE|"
+    return 0
 }
 
 cmd_start() {
@@ -119,6 +187,14 @@ cmd_start() {
     echo "Stop with: meetinginsights stop"
     echo
     echo "Please make sure everyone on the call knows they are being recorded."
+}
+
+# Quiet readiness probe: exit 0 when the app can run, 1 when setup is needed.
+cmd_ready() {
+    [[ -x "$PY" && -x "$LLAMA" && -s "$LLM_MODEL" ]] || return 1
+    # a truncated GGUF still carries the magic bytes, so check the size too
+    [[ $(stat -c%s "$LLM_MODEL" 2>/dev/null || echo 0) -ge 300000000 ]] || return 1
+    [[ "$(head -c4 "$LLM_MODEL" 2>/dev/null)" == "GGUF" ]]
 }
 
 cmd_status() {
@@ -184,7 +260,8 @@ case "${1:-}" in
     start)  shift; cmd_start "$@" ;;
     stop)   cmd_stop ;;
     status) cmd_status ;;
-    setup)  cmd_setup ;;
+    ready)  cmd_ready ;;
+    setup)  shift; cmd_setup "$@" ;;
     notes)  shift; [[ $# -ge 1 ]] || die "usage: meetinginsights notes <transcript.txt>"; cmd_notes "$@" ;;
     -h|--help|help|"") sed -n '3,17p' "$0" | sed 's/^# \?//' ;;
     *) die "unknown command: $1 (try: meetinginsights help)" ;;

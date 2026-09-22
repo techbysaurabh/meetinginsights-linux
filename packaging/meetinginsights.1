@@ -17,7 +17,9 @@ model, and action-item owners are read off the transcript.
 .TP
 .B setup
 Prepare the Python environment and download the speech and language models
-(about 1.5 GB). Run once, as your normal user.
+(about 1.5 GB). Run once, as your normal user. The desktop application offers
+to do this for you on first launch, so this is only needed for headless use.
+Pass \fB--porcelain\fR to emit machine-readable progress.
 .TP
 .BI "start " title
 Begin recording. Prints a reminder to tell participants they are being recorded.
@@ -27,6 +29,11 @@ Stop recording, then transcribe and write the minutes.
 .TP
 .B status
 Report whether a recording is in progress.
+.TP
+.B ready
+Exit 0 if the application is set up, 1 if
+.B setup
+still needs to be run. Intended for scripts and the desktop app.
 .TP
 .BI "notes " transcript
 Regenerate minutes from an existing transcript file.

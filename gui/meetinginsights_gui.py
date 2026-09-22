@@ -160,6 +160,117 @@ def inline(t: str) -> str:
     return t
 
 
+
+class SetupDialog(Gtk.Dialog):
+    """First-run setup: prepares the Python environment and downloads the models.
+
+    The work is done by `meetinginsights setup --porcelain`, which emits
+    STEP/PCT/ERR/DONE lines; this dialog only renders them. Keeping the logic in
+    the CLI means the terminal and the desktop app cannot drift apart.
+    """
+
+    def __init__(self, parent, cli):
+        super().__init__(title="Set up MeetingInsights", transient_for=parent, modal=True)
+        self.cli = cli
+        self.ok = False
+        self.proc = None
+        self.set_default_size(460, -1)
+        self.set_deletable(False)
+
+        box = self.get_content_area()
+        box.set_spacing(14)
+        box.set_margin_top(20); box.set_margin_bottom(16)
+        box.set_margin_start(22); box.set_margin_end(22)
+
+        head = Gtk.Label(xalign=0)
+        head.set_markup("<b>One-time setup</b>")
+        box.pack_start(head, False, False, 0)
+
+        blurb = Gtk.Label(xalign=0, wrap=True)
+        blurb.set_text(
+            "MeetingInsights needs a speech model and a language model so it can "
+            "transcribe and summarise without sending anything to a server.\n\n"
+            "This downloads about 1.5 GB once. Everything afterwards runs offline.")
+        blurb.get_style_context().add_class("dim-label")
+        box.pack_start(blurb, False, False, 0)
+
+        self.bar = Gtk.ProgressBar(show_text=True)
+        self.bar.set_text("Ready to start")
+        self.bar.set_fraction(0.0)
+        box.pack_start(self.bar, False, False, 0)
+
+        self.status = Gtk.Label(xalign=0, wrap=True)
+        self.status.get_style_context().add_class("micro")
+        box.pack_start(self.status, False, False, 0)
+
+        self.cancel_btn = self.add_button("Not now", Gtk.ResponseType.CANCEL)
+        self.start_btn = self.add_button("Download and set up", Gtk.ResponseType.OK)
+        self.start_btn.get_style_context().add_class("suggested-action")
+        self.connect("response", self.on_response)
+        self.show_all()
+
+    def on_response(self, _dlg, resp):
+        if resp == Gtk.ResponseType.OK and self.proc is None:
+            self.start_btn.set_sensitive(False)
+            self.cancel_btn.set_sensitive(False)
+            self.bar.set_text("Starting…")
+            threading.Thread(target=self._worker, daemon=True).start()
+        elif resp == Gtk.ResponseType.CANCEL and self.proc is None:
+            self.destroy()
+
+    def _worker(self):
+        try:
+            self.proc = subprocess.Popen(
+                [self.cli, "setup", "--porcelain"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                kind, _, val = line.partition("|")
+                GLib.idle_add(self._update, kind, val)
+            self.proc.wait()
+            GLib.idle_add(self._finish, self.proc.returncode)
+        except Exception as e:                      # noqa: BLE001 - surfaced in the dialog
+            GLib.idle_add(self._fail, str(e))
+
+    def _update(self, kind, val):
+        if kind == "PCT":
+            try:
+                f = max(0.0, min(1.0, int(val) / 100))
+            except ValueError:
+                return False
+            self.bar.set_fraction(f)
+            self.bar.set_text(f"{int(f * 100)}%")
+        elif kind == "STEP":
+            self.status.set_text(val)
+        elif kind == "ERR":
+            self._fail(val)
+        return False
+
+    def _finish(self, code):
+        if code == 0:
+            self.ok = True
+            self.bar.set_fraction(1.0)
+            self.bar.set_text("Done")
+            self.status.set_text("Setup complete.")
+            GLib.timeout_add(700, lambda: (self.destroy(), False)[1])
+        else:
+            self._fail("Setup did not complete. See the terminal output for details.")
+        return False
+
+    def _fail(self, msg):
+        self.bar.set_text("Failed")
+        self.status.set_text(msg)
+        self.cancel_btn.set_label("Close")
+        self.cancel_btn.set_sensitive(True)
+        self.start_btn.set_label("Try again")
+        self.start_btn.set_sensitive(True)
+        self.proc = None
+        return False
+
+
 class MeetingInsightsWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="MeetingInsights")
@@ -197,6 +308,7 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
 
         self.load_meetings()
         self.poll_state()
+        GLib.timeout_add(400, self._first_run_check)
         GLib.timeout_add_seconds(1, self.tick)
 
     def _build_controls(self):
@@ -222,6 +334,29 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
         self.rec_btn.connect("clicked", lambda *_: self.on_record())
         box.pack_start(self.rec_btn, False, False, 0)
         return box
+
+    # ---------- first run ----------
+    def is_ready(self):
+        """`meetinginsights ready` exits non-zero until setup has been run."""
+        try:
+            return self.cli("ready").returncode == 0
+        except Exception:
+            return False
+
+    def _first_run_check(self, force=False):
+        if self.is_ready():
+            return False
+        self.run_setup()
+        return False
+
+    def run_setup(self):
+        dlg = SetupDialog(self, CLI)
+        dlg.run()
+        ready = dlg.ok
+        dlg.destroy()
+        if ready:
+            self.load_meetings()
+        return ready
 
     # ---------- state ----------
     def cli(self, *args):
@@ -286,6 +421,8 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
             self.set_mode("busy", "Transcribing…")
             threading.Thread(target=self._stop_worker, daemon=True).start()
         elif self.mode == "idle":
+            if not self.is_ready() and not self.run_setup():
+                return
             title = self.entry.get_text().strip() or "meeting"
             r = self.cli("start", title)
             if r.returncode == 0:

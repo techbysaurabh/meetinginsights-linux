@@ -30,8 +30,11 @@ for so in "$LLAMA_DIR"/*.so*; do install -m644 "$so" "$B/usr/lib/meetinginsights
 # a baked-in rpath would send the loader looking in the build tree at runtime
 if command -v patchelf >/dev/null; then
     for f in "$B"/usr/lib/meetinginsights/llama/*; do patchelf --remove-rpath "$f" 2>/dev/null || true; done
+elif command -v pip3 >/dev/null && pip3 install --quiet --user patchelf 2>/dev/null \
+     && [ -x "$HOME/.local/bin/patchelf" ]; then
+    for f in "$B"/usr/lib/meetinginsights/llama/*; do "$HOME/.local/bin/patchelf" --remove-rpath "$f" 2>/dev/null || true; done
 else
-    echo "warning: patchelf not found — rpaths left in place" >&2
+    echo "warning: patchelf unavailable; verify with 'lintian' that no rpath survived" >&2
 fi
 strip --strip-unneeded "$B"/usr/lib/meetinginsights/llama/* 2>/dev/null || true
 
