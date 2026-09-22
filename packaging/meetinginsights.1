@@ -1,0 +1,57 @@
+.TH MEETINGINSIGHTS 1 "2026" "meetinginsights 0.1.0" "User Commands"
+.SH NAME
+meetinginsights \- record meetings and write minutes, entirely on device
+.SH SYNOPSIS
+.B meetinginsights
+.I command
+.RI [ arguments ]
+.SH DESCRIPTION
+Records the microphone and system audio as separate channels, transcribes each
+locally with faster-whisper, and writes structured minutes with a small local
+language model. No audio or transcript leaves the machine and no API key is used.
+.PP
+Because the microphone is captured to the left channel and system audio to the
+right, speaker attribution comes from audio routing rather than a diarization
+model, and action-item owners are read off the transcript.
+.SH COMMANDS
+.TP
+.B setup
+Prepare the Python environment and download the speech and language models
+(about 1.5 GB). Run once, as your normal user.
+.TP
+.BI "start " title
+Begin recording. Prints a reminder to tell participants they are being recorded.
+.TP
+.B stop
+Stop recording, then transcribe and write the minutes.
+.TP
+.B status
+Report whether a recording is in progress.
+.TP
+.BI "notes " transcript
+Regenerate minutes from an existing transcript file.
+.SH ENVIRONMENT
+.TP
+.B MEETINGINSIGHTS_OUT
+Directory for the written minutes. Default ~/MeetingNotes.
+.TP
+.B MEETINGINSIGHTS_WHISPER_MODEL
+faster-whisper model name. Default small.en; medium.en is more accurate and slower.
+.TP
+.B MEETINGINSIGHTS_LLM_MODEL
+Path to a GGUF chat model used for the prose summaries.
+.TP
+.B MEETINGINSIGHTS_YOU ", " MEETINGINSIGHTS_THEM
+Labels for the microphone and system-audio channels.
+.SH FILES
+.TP
+.I ~/MeetingNotes/
+Written minutes, one Markdown file per meeting.
+.TP
+.I ~/.local/share/meetinginsights/rec/
+Recordings and transcripts.
+.SH NOTES
+Recording a conversation without informing the other participants is unlawful
+in many jurisdictions. Please obtain consent.
+.SH SEE ALSO
+Project page: https://github.com/techbysaurabh/meetinginsights-linux

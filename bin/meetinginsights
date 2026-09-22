@@ -37,7 +37,14 @@ LLM_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwe
 YOU_LABEL="${MEETINGINSIGHTS_YOU:-You}"
 THEM_LABEL="${MEETINGINSIGHTS_THEM:-Participants}"
 PY="${MEETINGINSIGHTS_PYTHON:-$DATA_DIR/venv/bin/python}"
-LLAMA="${MEETINGINSIGHTS_LLAMA:-$DATA_DIR/llama/llama}"
+LLAMA="${MEETINGINSIGHTS_LLAMA:-}"
+if [[ -z "$LLAMA" ]]; then
+    for _l in "$DATA_DIR/llama/llama" "/usr/lib/meetinginsights/llama/llama" \
+              "/usr/local/lib/meetinginsights/llama/llama"; do
+        [[ -x "$_l" ]] && { LLAMA="$_l"; break; }
+    done
+    LLAMA="${LLAMA:-$DATA_DIR/llama/llama}"
+fi
 STATE="$DATA_DIR/current"
 
 die()  { echo "meetinginsights: $*" >&2; exit 1; }
@@ -64,6 +71,13 @@ cmd_setup() {
             || { rm -f "$LLM_MODEL.part"; die "model download failed"; }
     else
         echo "Language model present."
+    fi
+    if [[ ! -x "$PY" ]]; then
+        echo "Creating the Python environment (a few minutes, one time)..."
+        need python3
+        python3 -m venv "$DATA_DIR/venv" || die "could not create the Python environment (is python3-venv installed?)"
+        "$DATA_DIR/venv/bin/pip" install -q --upgrade pip
+        "$DATA_DIR/venv/bin/pip" install -q faster-whisper || die "could not install faster-whisper"
     fi
     if [[ -x "$PY" ]]; then
         echo "Fetching the speech model (one time)..."

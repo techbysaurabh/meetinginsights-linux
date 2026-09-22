@@ -37,10 +37,33 @@ model and into rules fixed every misclassification and cut runtime by ~75%.
 
 ## Install
 
+**Debian / Ubuntu** — the package bundles the llama.cpp runtime, so nothing has
+to be compiled:
+
 ```sh
-./install.sh          # installs to ~/.local, creates the Python environment
-meetinginsights setup       # fetches the speech and language models (~1.5 GB, once)
+sudo apt install ./meetinginsights_0.1.0_amd64.deb
+meetinginsights setup      # prepares Python and downloads the models (~1.5 GB, once)
 ```
+
+**From source** (any distro):
+
+```sh
+./install.sh               # installs to ~/.local
+meetinginsights setup
+```
+
+Building llama.cpp yourself is only needed for the source install:
+
+```sh
+git clone --depth 1 https://github.com/ggml-org/llama.cpp
+cd llama.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+cmake --build build -j --target llama-app
+mkdir -p ~/.local/share/meetinginsights/llama
+cp build/bin/llama build/bin/*.so* ~/.local/share/meetinginsights/llama/
+```
+
+Upstream's prebuilt binaries require glibc 2.34, which rules out Ubuntu 20.04
+and 22.04 — which is why the `.deb` ships its own build.
 
 ## Use
 

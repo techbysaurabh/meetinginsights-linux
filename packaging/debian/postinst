@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q /usr/share/applications || true
+    fi
+    echo ""
+    echo "MeetingInsights installed. Finish setup with:"
+    echo "    meetinginsights setup"
+    echo "This downloads the speech and language models (~1.5 GB) into your"
+    echo "home directory and needs to be run once, as your normal user."
+    echo ""
+fi
+exit 0

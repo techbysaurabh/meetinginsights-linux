@@ -1,20 +1,22 @@
-Source: meetinginsights
+Package: meetinginsights
+Version: 0.1.0
 Section: sound
 Priority: optional
-Maintainer: techbysaurabh <hi.techbysaurabh@gmail.com>
-Build-Depends: debhelper-compat (= 13)
-Standards-Version: 4.6.0
-Homepage: https://github.com/techbysaurabh/meetinginsights-linux
-
-Package: meetinginsights
 Architecture: amd64
-Depends: ${misc:Depends}, python3 (>= 3.9), python3-venv, python3-gi,
- gir1.2-gtk-3.0, gir1.2-webkit2-4.0, gir1.2-notify-0.7,
- pulseaudio-utils, ffmpeg, curl
-Description: Record meetings and write notes, entirely on device
- MeetingInsights records a meeting from the microphone and system audio, transcribes
- it locally with faster-whisper and writes structured notes with a small local
- language model. No account, no API key and no audio ever leaves the machine.
+Depends: python3 (>= 3.8), python3-venv, python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.0, gir1.2-notify-0.7, pulseaudio-utils, ffmpeg, curl, libc6 (>= 2.14), libgcc-s1, libstdc++6
+Installed-Size: 43764
+Maintainer: techbysaurabh <hi.techbysaurabh@gmail.com>
+Homepage: https://github.com/techbysaurabh/meetinginsights-linux
+Description: On-device meeting recorder and AI note taker
+ MeetingInsights records a meeting from the microphone and system audio,
+ transcribes it locally with faster-whisper and writes structured minutes
+ with a small local language model. No account, no API key, and no audio
+ ever leaves the machine.
  .
- Speaker attribution comes from audio routing rather than a diarization model:
- the microphone is recorded to the left channel and system audio to the right.
+ Speaker attribution comes from audio routing rather than a diarization
+ model: the microphone is recorded to the left channel and system audio to
+ the right, so action-item owners are read off the transcript instead of
+ being inferred.
+ .
+ A one-time "meetinginsights setup" downloads the speech and language
+ models (about 1.5 GB) and prepares the Python environment.
