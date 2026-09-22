@@ -174,6 +174,12 @@ class SetupDialog(Gtk.Dialog):
         self.cli = cli
         self.ok = False
         self.proc = None
+        self.tail = []
+        # Gtk.Dialog.run() returns as soon as any response fires, which would tear
+        # the dialog down the instant "Download and set up" is pressed. Drive our
+        # own loop instead and close only when the work finishes or is cancelled.
+        self.loop = GLib.MainLoop()
+        self.connect("destroy", lambda *_: self.loop.quit())
         self.set_default_size(460, -1)
         self.set_deletable(False)
 
@@ -210,6 +216,7 @@ class SetupDialog(Gtk.Dialog):
         self.show_all()
 
     def on_response(self, _dlg, resp):
+        self.stop_emission_by_name("response")
         if resp == Gtk.ResponseType.OK and self.proc is None:
             self.start_btn.set_sensitive(False)
             self.cancel_btn.set_sensitive(False)
@@ -224,9 +231,13 @@ class SetupDialog(Gtk.Dialog):
                 [self.cli, "setup", "--porcelain"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
+            self.tail = []
             for line in self.proc.stdout:
                 line = line.strip()
-                if not line or "|" not in line:
+                if not line:
+                    continue
+                self.tail = (self.tail + [line])[-4:]
+                if "|" not in line:
                     continue
                 kind, _, val = line.partition("|")
                 GLib.idle_add(self._update, kind, val)
@@ -257,7 +268,8 @@ class SetupDialog(Gtk.Dialog):
             self.status.set_text("Setup complete.")
             GLib.timeout_add(700, lambda: (self.destroy(), False)[1])
         else:
-            self._fail("Setup did not complete. See the terminal output for details.")
+            detail = " ".join(getattr(self, "tail", [])) or f"exit code {code}"
+            self._fail(f"Setup did not complete — {detail}")
         return False
 
     def _fail(self, msg):
@@ -351,9 +363,9 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
 
     def run_setup(self):
         dlg = SetupDialog(self, CLI)
-        dlg.run()
+        dlg.show_all()
+        dlg.loop.run()                 # returns when the dialog is destroyed
         ready = dlg.ok
-        dlg.destroy()
         if ready:
             self.load_meetings()
         return ready
