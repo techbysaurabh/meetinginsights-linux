@@ -19,6 +19,9 @@ command -v fakeroot >/dev/null || { echo "need fakeroot" >&2; exit 1; }
 rm -rf "$B"; mkdir -p "$B"/{DEBIAN,usr/bin,usr/share/meetinginsights,usr/lib/meetinginsights/llama,usr/share/applications,usr/share/doc/meetinginsights,usr/share/man/man1}
 
 cp -r "$SRC/lib" "$SRC/gui" "$B/usr/share/meetinginsights/"
+# bytecode from a local test run must not ship in the package
+find "$B/usr/share/meetinginsights" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+find "$B/usr/share/meetinginsights" -name '*.py[co]' -delete 2>/dev/null || true
 install -m755 "$SRC/bin/meetinginsights" "$B/usr/bin/meetinginsights"
 printf '#!/bin/bash\nexec python3 /usr/share/meetinginsights/gui/meetinginsights_gui.py "$@"\n' \
     > "$B/usr/bin/meetinginsights-gui"
