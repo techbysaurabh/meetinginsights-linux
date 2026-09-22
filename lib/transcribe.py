@@ -14,12 +14,64 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 
+def channels_duplicated(left, right, rate, window_s=20):
+    """True when both channels carry the same signal, merely time-shifted.
+
+    If the microphone and the system monitor end up on the same source, each
+    channel transcribes the same speech and every turn gets attributed twice
+    under two different names. Labelling that as two speakers is worse than
+    admitting there is only one track, so detect it and say so.
+
+    Correlation must be measured at the best lag: the two paths are offset by
+    hundreds of milliseconds, and comparing them sample-aligned (or after
+    decimating) hides an otherwise perfect match.
+    """
+    n = min(len(left), len(right))
+    if n < rate * 4:
+        return False
+    mid = n // 2
+    half = min(int(rate * window_s), n) // 2
+    a = left[mid - half:mid + half].astype(np.float64)
+    b = right[mid - half:mid + half].astype(np.float64)
+    if a.size == 0 or b.size == 0:
+        return False
+    a = a - a.mean()
+    b = b - b.mean()
+    if not np.any(a) or not np.any(b):
+        return False
+    c = np.correlate(a, b, mode="full")
+    lag = int(c.argmax()) - (len(b) - 1)
+    if lag >= 0:
+        x, y = a[lag:], b[:len(b) - lag]
+    else:
+        x, y = a[:len(a) + lag], b[-lag:]
+    m = min(len(x), len(y))
+    if m < rate:
+        return False
+    r = float(np.corrcoef(x[:m], y[:m])[0, 1])
+    return r > 0.98
+
+
 def mmss(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m:02d}:{s:02d}"
 
 
+def check_only(path: Path) -> int:
+    """--check-channels: exit 0 when the two channels differ, 1 when duplicated."""
+    import wave as _w
+    with _w.open(str(path), "rb") as w:
+        ch, rate = w.getnchannels(), w.getframerate()
+        raw = w.readframes(w.getnframes())
+    if ch != 2:
+        return 0
+    st = (np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0).reshape(-1, 2)
+    return 1 if channels_duplicated(st[:, 0], st[:, 1], rate) else 0
+
+
 def main() -> int:
+    if sys.argv[1] == "--check-channels":
+        return check_only(Path(sys.argv[2]))
     wav, out = Path(sys.argv[1]), Path(sys.argv[2])
     model_size = sys.argv[3] if len(sys.argv) > 3 else "small.en"
     you = sys.argv[4] if len(sys.argv) > 4 else "You"
@@ -35,8 +87,14 @@ def main() -> int:
     tracks = {}
     if channels == 2:
         stereo = audio.reshape(-1, 2)
-        tracks[you] = stereo[:, 0]
-        tracks[them] = stereo[:, 1]
+        if channels_duplicated(stereo[:, 0], stereo[:, 1], rate):
+            print("WARNING: both channels contain the same audio — the microphone "
+                  "and system capture resolved to one source. Transcribing as a "
+                  "single track; speakers cannot be told apart.", file=sys.stderr)
+            tracks["Speaker"] = stereo[:, 0]
+        else:
+            tracks[you] = stereo[:, 0]
+            tracks[them] = stereo[:, 1]
     else:
         tracks["Speaker"] = audio
 

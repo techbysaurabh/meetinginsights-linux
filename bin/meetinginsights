@@ -190,7 +190,26 @@ cmd_start() {
     local mon; mon=$(default_monitor)
     [[ -n "$mon" ]] || die "could not find the default audio sink (is PulseAudio or PipeWire running?)"
 
-    parec --device=@DEFAULT_SOURCE@ --format=s16le --rate=16000 --channels=1 \
+    # Resolve the microphone by name rather than passing @DEFAULT_SOURCE@ blind:
+    # if the default input is itself a monitor, both captures record the same
+    # thing and every turn gets attributed twice under two different names.
+    local src; src=$(pactl info 2>/dev/null | awk -F': ' '/Default Source/{print $2}')
+    [[ -n "$src" ]] || die "could not determine the default audio input"
+    if [[ "$src" == *.monitor ]]; then
+        local real; real=$(pactl list short sources 2>/dev/null | grep -v '\.monitor' | awk 'NR==1{print $2}')
+        if [[ -n "$real" ]]; then
+            echo "Note: the default input is a monitor of the speakers; using $real instead."
+            src="$real"
+        else
+            die "the default audio input is a monitor, not a microphone, and no real input was found — pick one in Sound settings"
+        fi
+    fi
+    if [[ "$src" == "$mon" ]]; then
+        die "microphone and system capture resolve to the same device ($src) — pick a real input in Sound settings"
+    fi
+    printf 'mic:    %s\nsystem: %s\n' "$src" "$mon" > "$DATA_DIR/.devices.log"
+
+    parec --device="$src" --format=s16le --rate=16000 --channels=1 \
         --file-format=wav "$base.mic.wav" >/dev/null 2>&1 &
     echo $! > "$DATA_DIR/.mic.pid"
     parec --device="$mon" --format=s16le --rate=16000 --channels=1 \
@@ -254,7 +273,17 @@ cmd_stop() {
         -filter_complex "[0:a]apad=whole_dur=$dmax[l];[1:a]apad=whole_dur=$dmax[r];[l][r]join=inputs=2:channel_layout=stereo[a]" \
         -map "[a]" -ar 16000 "$base.wav" 2>&1 | tail -2
     [[ -s "$base.wav" ]] || die "could not merge the two audio channels"
-    rm -f "$base.mic.wav" "$base.sys.wav"
+
+    # Check the merge before throwing the sources away. If both channels carry
+    # the same signal the recording is unusable for speaker attribution, and
+    # deleting the per-channel files would destroy the only evidence of why.
+    if "$PY" "$PREFIX/lib/transcribe.py" --check-channels "$base.wav" 2>/dev/null; then
+        rm -f "$base.mic.wav" "$base.sys.wav"
+    else
+        echo "Warning: both channels captured the same audio, so speakers cannot be" >&2
+        echo "told apart. Keeping $(basename "$base").mic.wav and .sys.wav for diagnosis;" >&2
+        echo "check the input device in Sound settings." >&2
+    fi
 
     local live_pid="" used_live=0
     [[ -f "$DATA_DIR/.live.pid" ]] && { live_pid=$(cat "$DATA_DIR/.live.pid"); rm -f "$DATA_DIR/.live.pid"; }
