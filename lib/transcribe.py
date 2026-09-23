@@ -7,6 +7,7 @@ chronologically into a single labelled transcript.
 
 Usage: transcribe.py <wav> <out.txt> [model] [you_label] [them_label]
 """
+import re
 import sys
 from pathlib import Path
 
@@ -50,6 +51,28 @@ def channels_duplicated(left, right, rate, window_s=20):
         return False
     r = float(np.corrcoef(x[:m], y[:m])[0, 1])
     return r > 0.98
+
+
+def transcripts_overlap(rows_a, rows_b, threshold=0.45):
+    """True when two channels transcribed largely the same speech.
+
+    Catches acoustic bleed: with speakers rather than headphones the microphone
+    hears the far end too, so both channels carry the same words. The waveforms
+    differ (room reverb, mic response) so a correlation test passes them, but
+    the text does not lie. Compared on word 4-grams, which survive the small
+    recognition differences between the two paths.
+    """
+    def grams(rows):
+        # normalise punctuation: the two paths transcribe the same speech with
+        # different commas and capitals, which would otherwise break every match
+        text = re.sub(r"[^a-z0-9 ]", " ", " ".join(t.lower() for _, t in rows))
+        words = text.split()
+        return {tuple(words[i:i + 4]) for i in range(len(words) - 3)}
+
+    ga, gb = grams(rows_a), grams(rows_b)
+    if len(ga) < 12 or len(gb) < 12:
+        return False
+    return len(ga & gb) / min(len(ga), len(gb)) >= threshold
 
 
 def mmss(seconds: float) -> str:
@@ -140,12 +163,33 @@ def main() -> int:
             if text:
                 rows.append((seg.start, label, text))
 
+    # If both channels heard the same speech, keep the louder one rather than
+    # reporting every sentence twice under two names.
+    if len(tracks) == 2:
+        labels = list(tracks)
+        per = {lab: [(st, tx) for st, l, tx in rows if l == lab] for lab in labels}
+        if transcripts_overlap(per[labels[0]], per[labels[1]]):
+            # Keep whichever channel recognised more speech, not the louder one:
+            # the microphone is usually louder but is a room re-recording of the
+            # far end, while the system monitor is a clean digital copy.
+            best = max(labels, key=lambda l: sum(len(tx.split()) for _, tx in per[l]))
+            print(f"WARNING: both channels transcribed the same speech — the microphone "
+                  f"is picking up the other side (speakers rather than headphones). "
+                  f"Keeping the '{best}' channel only; speakers cannot be told apart.",
+                  file=sys.stderr)
+            rows = [(st, "Speaker", tx) for st, lab, tx in rows if lab == best]
+
     rows.sort(key=lambda r: r[0])
 
     # merge consecutive lines from the same speaker into one paragraph
     merged, prev = [], None
     for start, label, text in rows:
-        if prev and prev[1] == label and start - prev[2] < 8:
+        # Merge consecutive segments from one speaker into a readable turn, but
+        # stop at roughly a paragraph. Without a cap a single-speaker recording
+        # collapses into one enormous turn, which reads badly and makes every
+        # downstream action item a wall of text.
+        if (prev and prev[1] == label and start - prev[2] < 8
+                and len(merged[-1][2].split()) < 60):
             merged[-1] = (merged[-1][0], label, merged[-1][2] + " " + text)
         else:
             merged.append((start, label, text))
