@@ -69,7 +69,31 @@ def check_only(path: Path) -> int:
     return 1 if channels_duplicated(st[:, 0], st[:, 1], rate) else 0
 
 
+def levels(path: Path) -> int:
+    """--levels: describe how loud each channel was, in plain language."""
+    import wave as _w
+    with _w.open(str(path), "rb") as w:
+        ch, rate = w.getnchannels(), w.getframerate()
+        raw = w.readframes(w.getnframes())
+    a = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    chans = ([("Microphone", a[0::2]), ("System audio", a[1::2])] if ch == 2
+             else [("Audio", a)])
+    for name, data in chans:
+        if data.size == 0:
+            continue
+        rms = float(np.sqrt((data ** 2).mean()))
+        if rms < 0.0005:
+            print(f"  {name}: silent — nothing was captured on this input.")
+        elif rms < 0.005:
+            print(f"  {name}: very quiet (rms {rms:.4f}) — check the input level.")
+        else:
+            print(f"  {name}: audible (rms {rms:.4f}).")
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1] == "--levels":
+        return levels(Path(sys.argv[2]))
     if sys.argv[1] == "--check-channels":
         return check_only(Path(sys.argv[2]))
     wav, out = Path(sys.argv[1]), Path(sys.argv[2])

@@ -23,6 +23,7 @@ from gi.repository import Gdk, GLib, Gtk, Notify, Pango, WebKit2  # noqa: E402
 
 HOME = Path.home()
 NOTES_DIR = Path(os.environ.get("MEETINGINSIGHTS_OUT", HOME / "MeetingNotes"))
+DATA_DIR = Path(os.environ.get("MEETINGINSIGHTS_HOME", HOME / ".local/share/meetinginsights"))
 REC_DIR = Path(os.environ.get("MEETINGINSIGHTS_HOME", HOME / ".local/share/meetinginsights")) / "rec"
 CLI = os.environ.get("MEETINGINSIGHTS_CLI") or shutil.which("meetinginsights") or str(
     Path(__file__).resolve().parent.parent / "bin" / "meetinginsights")
@@ -347,6 +348,50 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
         box.pack_start(self.rec_btn, False, False, 0)
         return box
 
+    # ---------- live transcript ----------
+    def current_base(self):
+        """Path prefix of the recording in progress, from the CLI's state file."""
+        try:
+            first = (DATA_DIR / "current").read_text().splitlines()[0].strip()
+            return Path(first) if first else None
+        except (OSError, IndexError):
+            return None
+
+    def show_live(self):
+        base = self.current_base()
+        text = ""
+        if base:
+            try:
+                text = Path(str(base) + ".partial.txt").read_text()
+            except OSError:
+                text = ""
+        if text == getattr(self, "_live_text", None):
+            return
+        self._live_text = text
+        if text.strip():
+            body = "".join(
+                f"<p><span class='t'>{html.escape(t)}</span> "
+                f"<span class='s'>{html.escape(sp)}</span> {html.escape(rest)}</p>"
+                for t, sp, rest in (self._split_turn(l) for l in text.splitlines() if l.strip()))
+            note = "<p class='hint'>Transcribing as the meeting runs — the rest is written when you press Stop.</p>"
+        else:
+            body = ""
+            note = ("<p class='hint'>Listening. The first lines appear after about "
+                    "a minute of speech.</p>")
+        self.webview.load_html(
+            f"<style>{NOTE_CSS}"
+            ".t{color:#7C8B93;font-family:monospace;font-size:12px}"
+            ".s{color:#66B29D;font-weight:600}"
+            ".hint{color:#7C8B93;font-style:italic}"
+            "p{margin:6px 0}</style>"
+            f"<h2>Live transcript</h2>{note}{body}"
+            "<script>window.scrollTo(0, document.body.scrollHeight);</script>", None)
+
+    @staticmethod
+    def _split_turn(line):
+        m = re.match(r"\[(\d{2}:\d{2})\]\s+([^:]+):\s*(.*)", line.strip())
+        return m.groups() if m else ("", "", line.strip())
+
     # ---------- first run ----------
     def is_ready(self):
         """`meetinginsights ready` exits non-zero until setup has been run."""
@@ -421,6 +466,8 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
             elif not live and self.mode == "recording":
                 self.set_mode("idle")
                 self.load_meetings()
+        if self.mode == "recording":
+            self.show_live()
         if self.mode == "recording" and self.started_at:
             e = int(time.time() - self.started_at)
             self.timer_lbl.set_text(f"{e//3600:02d}:{(e%3600)//60:02d}:{e%60:02d}"
@@ -450,6 +497,7 @@ class MeetingInsightsWindow(Gtk.ApplicationWindow):
 
     def _stop_done(self, r):
         self.set_mode("idle")
+        self._live_text = None
         self.load_meetings()
         if r.returncode == 0:
             self.notify("Notes ready", "Meeting notes have been written.")

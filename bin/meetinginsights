@@ -304,10 +304,17 @@ cmd_stop() {
     if (( ! used_live )); then
         echo "Transcribing on this machine (model: $WHISPER_MODEL)..."
         "$PY" "$PREFIX/lib/transcribe.py" "$base.wav" "$base.txt" \
-            "$WHISPER_MODEL" "$YOU_LABEL" "$THEM_LABEL" \
-            || die "nothing was transcribed — was the recording silent?"
+            "$WHISPER_MODEL" "$YOU_LABEL" "$THEM_LABEL" || true
     fi
-    [[ -s "$base.txt" ]] || die "nothing was transcribed — was the recording silent?"
+    if [[ ! -s "$base.txt" ]]; then
+        # Say which side was silent rather than printing a log: a flat
+        # microphone is a setup problem the person can actually act on.
+        local diag; diag=$("$PY" "$PREFIX/lib/transcribe.py" --levels "$base.wav" 2>/dev/null)
+        echo "No speech was recognised in this recording." >&2
+        [[ -n "$diag" ]] && echo "$diag" >&2
+        echo "The audio is kept at $base.wav if you want to try again." >&2
+        return 1
+    fi
 
     cmd_notes "$base.txt" "$title" "$mins"
 }
